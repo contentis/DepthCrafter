@@ -28,12 +28,13 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
         :param chunk_size: the chunk size to encode video
         :return: image_embeddings in shape of [b, 1024]
         """
-
+        torch.cuda.nvtx.range_push("encode_video")
         video_224 = _resize_with_antialiasing(video.float(), (224, 224))
         video_224 = (video_224 + 1.0) / 2.0  # [-1, 1] -> [0, 1]
 
         embeddings = []
         for i in range(0, video_224.shape[0], chunk_size):
+            torch.cuda.nvtx.range_push("feature_extractor")
             tmp = self.feature_extractor(
                 images=video_224[i : i + chunk_size],
                 do_normalize=True,
@@ -43,8 +44,9 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
                 return_tensors="pt",
             ).pixel_values.to(video.device, dtype=video.dtype)
             embeddings.append(self.image_encoder(tmp).image_embeds)  # [b, 1024]
-
+            torch.cuda.nvtx.range_pop()
         embeddings = torch.cat(embeddings, dim=0)  # [t, 1024]
+        torch.cuda.nvtx.range_pop()
         return embeddings
 
     @torch.inference_mode()
@@ -59,11 +61,15 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
         :return: vae latents in shape of [b, c, h, w]
         """
         video_latents = []
+        torch.cuda.nvtx.range_push("encode_vae_video")
         for i in range(0, video.shape[0], chunk_size):
+            torch.cuda.nvtx.range_push("encode_frame")
             video_latents.append(
                 self.vae.encode(video[i : i + chunk_size]).latent_dist.mode()
             )
+            torch.cuda.nvtx.range_pop()
         video_latents = torch.cat(video_latents, dim=0)
+        torch.cuda.nvtx.range_pop()
         return video_latents
 
     @staticmethod
@@ -256,7 +262,9 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
             video_embeddings_current = video_embeddings[:, idx_start:idx_end]
 
             with self.progress_bar(total=num_inference_steps) as progress_bar:
+                torch.cuda.nvtx.range_push("diffusion")
                 for i, t in enumerate(timesteps):
+                    torch.cuda.nvtx.range_push("diffusion_step")
                     if latents_all is not None and i == 0:
                         latents[:, :overlap] = (
                             latents_all[:, -overlap:]
@@ -319,7 +327,8 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
                         and (i + 1) % self.scheduler.order == 0
                     ):
                         progress_bar.update()
-
+                    torch.cuda.nvtx.range_pop()
+                torch.cuda.nvtx.range_pop()
             if latents_all is None:
                 latents_all = latents.clone()
             else:
@@ -344,8 +353,9 @@ class DepthCrafterPipeline(StableVideoDiffusionPipeline):
             # cast back to fp16 if needed
             if needs_upcasting:
                 self.vae.to(dtype=torch.float16)
+            torch.cuda.nvtx.range_push("decode_latent")
             frames = self.decode_latents(latents_all, num_frames, decode_chunk_size)
-
+            torch.cuda.nvtx.range_pop()
             if track_time:
                 decode_event.record()
                 torch.cuda.synchronize()

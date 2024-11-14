@@ -8,14 +8,14 @@ from diffusers.models.unets.unet_spatio_temporal_condition import UNetSpatioTemp
 class DiffusersUNetSpatioTemporalConditionModelDepthCrafter(
     UNetSpatioTemporalConditionModel
 ):
-
+    @torch.cuda.nvtx.range("unet_forward")
     def forward(
         self,
         sample: torch.Tensor,
         timestep: Union[torch.Tensor, float, int],
         encoder_hidden_states: torch.Tensor,
         added_time_ids: torch.Tensor,
-        return_dict: bool = True,
+        return_dict: bool = False,
     ) -> Union[UNetSpatioTemporalConditionOutput, Tuple]:
 
         # 1. time
@@ -56,7 +56,10 @@ class DiffusersUNetSpatioTemporalConditionModelDepthCrafter(
         sample = sample.flatten(0, 1)
         # Repeat the embeddings num_video_frames times
         # emb: [batch, channels] -> [batch * frames, channels]
-        emb = emb.repeat_interleave(num_frames, dim=0)
+        if torch.onnx.is_in_onnx_export():
+            emb = emb.repeat_interleave(num_frames.to(emb.device), dim=0)
+        else:
+            emb = emb.repeat_interleave(num_frames, dim=0)
         # encoder_hidden_states: [batch, frames, channels] -> [batch * frames, 1, channels]
         encoder_hidden_states = encoder_hidden_states.flatten(0, 1).unsqueeze(1)
 
